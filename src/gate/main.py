@@ -1,5 +1,6 @@
+import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated
 
 import httpx
@@ -8,8 +9,18 @@ from fastapi.responses import JSONResponse
 
 from gate.config import Settings
 from gate.schemas import ProxyRequest
+from gate.streaming import (
+    SSE_HEADERS,
+    SSEUsageParser,
+    UpstreamStreamingResponse,
+    sse_event,
+)
+
+logger = logging.getLogger(__name__)
 
 UPSTREAM_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
+CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
+JSON_HEADERS = {"content-type": "application/json"}
 
 
 def get_http_client(request: Request) -> httpx.AsyncClient:
@@ -17,11 +28,78 @@ def get_http_client(request: Request) -> httpx.AsyncClient:
     return client
 
 
+def upstream_error_body(message: str) -> dict[str, dict[str, str]]:
+    return {"error": {"message": message, "type": "upstream_error"}}
+
+
 def upstream_error(status_code: int, message: str) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content={"error": {"message": message, "type": "upstream_error"}},
+    return JSONResponse(status_code=status_code, content=upstream_error_body(message))
+
+
+async def forward(client: httpx.AsyncClient, body: bytes) -> Response:
+    try:
+        upstream = await client.post(
+            CHAT_COMPLETIONS_PATH, content=body, headers=JSON_HEADERS
+        )
+    except httpx.TimeoutException:
+        return upstream_error(504, "Upstream provider timed out")
+    except httpx.HTTPError:
+        return upstream_error(502, "Upstream provider unavailable")
+    return Response(
+        content=upstream.content,
+        status_code=upstream.status_code,
+        media_type=upstream.headers.get("content-type"),
     )
+
+
+async def forward_stream(
+    client: httpx.AsyncClient, body: bytes, request: Request
+) -> Response:
+    async with AsyncExitStack() as stack:
+        # Everything up to and including the first body chunk can still fail
+        # with a proper status code; after that the 200 is already on the wire.
+        try:
+            upstream = await stack.enter_async_context(
+                client.stream(
+                    "POST", CHAT_COMPLETIONS_PATH, content=body, headers=JSON_HEADERS
+                )
+            )
+            if not upstream.is_success:
+                await upstream.aread()
+                return Response(
+                    content=upstream.content,
+                    status_code=upstream.status_code,
+                    media_type=upstream.headers.get("content-type"),
+                )
+            chunks = upstream.aiter_bytes()
+            first = await anext(chunks, b"")
+        except httpx.TimeoutException:
+            return upstream_error(504, "Upstream provider timed out")
+        except httpx.HTTPError:
+            return upstream_error(502, "Upstream provider unavailable")
+
+        parser = SSEUsageParser()
+
+        async def relay() -> AsyncIterator[bytes]:
+            parser.feed(first)
+            yield first
+            try:
+                async for chunk in chunks:
+                    parser.feed(chunk)
+                    yield chunk
+            except httpx.HTTPError as exc:
+                logger.warning("Upstream stream failed mid-response: %r", exc)
+                if not parser.at_event_boundary:
+                    yield b"\n\n"
+                yield sse_event(upstream_error_body("Upstream stream interrupted"))
+            request.state.usage = parser.usage
+
+        return UpstreamStreamingResponse(
+            relay(),
+            media_type="text/event-stream",
+            headers=SSE_HEADERS,
+            close_upstream=stack.pop_all().aclose,
+        )
 
 
 def create_app(
@@ -46,26 +124,15 @@ def create_app(
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.post("/v1/chat/completions")
+    @app.post(CHAT_COMPLETIONS_PATH)
     async def chat_completions(
         payload: ProxyRequest,
         request: Request,
         client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
     ) -> Response:
-        try:
-            upstream = await client.post(
-                "/v1/chat/completions",
-                content=await request.body(),
-                headers={"content-type": "application/json"},
-            )
-        except httpx.TimeoutException:
-            return upstream_error(504, "Upstream provider timed out")
-        except httpx.HTTPError:
-            return upstream_error(502, "Upstream provider unavailable")
-        return Response(
-            content=upstream.content,
-            status_code=upstream.status_code,
-            media_type=upstream.headers.get("content-type"),
-        )
+        body = await request.body()
+        if payload.stream:
+            return await forward_stream(client, body, request)
+        return await forward(client, body)
 
     return app
