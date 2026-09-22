@@ -5,6 +5,7 @@ from collections.abc import Iterator
 
 import httpx
 import pytest
+from conftest import skip_api_key_auth
 from fastapi.testclient import TestClient
 
 from gate.config import Settings
@@ -25,7 +26,7 @@ def client() -> Iterator[TestClient]:
         settings=Settings(upstream_base_url="http://mock-provider"),
         transport=httpx.ASGITransport(app=provider),
     )
-    with TestClient(app) as client:
+    with TestClient(skip_api_key_auth(app)) as client:
         yield client
 
 

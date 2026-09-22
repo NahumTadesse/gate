@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from typing import Literal, get_args
 
 from sqlalchemy import (
     BigInteger,
@@ -22,7 +23,8 @@ from uuid_utils.compat import uuid7
 
 from gate.db import Base
 
-ROLES = ("owner", "admin", "member")
+Role = Literal["owner", "admin", "member"]
+ROLES: tuple[Role, ...] = get_args(Role)
 
 
 def created_at_column() -> Mapped[datetime]:
@@ -92,7 +94,7 @@ class Membership(Base):
     org_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("organizations.id", ondelete="CASCADE"), primary_key=True
     )
-    role: Mapped[str] = mapped_column(Text, nullable=False)
+    role: Mapped[Role] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = created_at_column()
 
     user: Mapped[User] = relationship(back_populates="memberships", lazy="raise_on_sql")

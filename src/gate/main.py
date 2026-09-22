@@ -11,6 +11,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from gate.api import router as api_router
+from gate.auth import ApiKeyError, get_api_key
 from gate.config import Settings
 from gate.db import create_engine, create_sessionmaker
 from gate.schemas import ProxyRequest
@@ -52,6 +54,21 @@ def upstream_error_body(message: str) -> dict[str, dict[str, str]]:
 
 def upstream_error(status_code: int, message: str) -> JSONResponse:
     return JSONResponse(status_code=status_code, content=upstream_error_body(message))
+
+
+def api_key_error(_: Request, exc: Exception) -> JSONResponse:
+    assert isinstance(exc, ApiKeyError)
+    return JSONResponse(
+        status_code=401,
+        content={
+            "error": {
+                "message": exc.message,
+                "type": "invalid_request_error",
+                "code": "invalid_api_key",
+            }
+        },
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 async def forward(client: httpx.AsyncClient, body: bytes) -> Response:
@@ -143,6 +160,9 @@ def create_app(
                 await engine.dispose()
 
     app = FastAPI(lifespan=lifespan)
+    app.state.settings = settings
+    app.add_exception_handler(ApiKeyError, api_key_error)
+    app.include_router(api_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -157,7 +177,7 @@ def create_app(
             )
         return JSONResponse({"status": "ok", "checks": {"database": "up"}})
 
-    @app.post(CHAT_COMPLETIONS_PATH)
+    @app.post(CHAT_COMPLETIONS_PATH, dependencies=[Depends(get_api_key)])
     async def chat_completions(
         payload: ProxyRequest,
         request: Request,

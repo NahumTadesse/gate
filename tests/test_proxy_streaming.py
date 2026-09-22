@@ -5,6 +5,7 @@ from typing import Any
 import anyio
 import httpx
 import pytest
+from conftest import skip_api_key_auth
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
@@ -210,10 +211,11 @@ def anyio_backend() -> str:
 
 
 def make_app(stream: UpstreamStream) -> FastAPI:
-    return create_app(
+    app = create_app(
         settings=Settings(upstream_base_url="http://upstream.test"),
         transport=httpx.MockTransport(lambda _: sse_response(stream)),
     )
+    return skip_api_key_auth(app)
 
 
 def http_scope(spec_version: str) -> dict[str, Any]:

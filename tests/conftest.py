@@ -1,12 +1,14 @@
 import asyncio
 import os
 from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import make_url, text
@@ -18,10 +20,13 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 from sqlalchemy.pool import NullPool
+from uuid_utils.compat import uuid7
 
+from gate.auth import get_api_key
 from gate.config import Settings
 from gate.db import create_engine, create_sessionmaker
 from gate.main import create_app
+from gate.models import ApiKey
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -151,6 +156,67 @@ async def committed_sessionmaker(
         await engine.dispose()
 
 
+def skip_api_key_auth(app: FastAPI) -> FastAPI:
+    """Accept every proxy request as coming from an active key, for proxy tests
+    that aren't about authentication and so shouldn't need a database."""
+    key = ApiKey(
+        id=uuid7(), org_id=uuid7(), name="test", prefix="gk_test0", key_hash="test"
+    )
+    app.dependency_overrides[get_api_key] = lambda: key
+    return app
+
+
+@pytest.fixture
+async def api_app(
+    test_database_url: str,
+    committed_sessionmaker: async_sessionmaker[AsyncSession],
+    upstream_requests: list[httpx.Request],
+) -> AsyncIterator[FastAPI]:
+    """The whole app against the test database, with an upstream that records
+    requests and answers 200.
+
+    Requests commit for real, each in its own session as in production, so
+    this builds on committed_sessionmaker (which also empties the tables around
+    each test). Tests can use that fixture to inspect or adjust the database.
+    """
+
+    def record(request: httpx.Request) -> httpx.Response:
+        upstream_requests.append(request)
+        return httpx.Response(200, json={"id": "chatcmpl-test"})
+
+    app = create_app(
+        settings=Settings(
+            database_url=test_database_url, upstream_base_url="http://upstream.test"
+        ),
+        transport=httpx.MockTransport(record),
+    )
+    async with app.router.lifespan_context(app):
+        yield app
+
+
+@pytest.fixture
+async def make_api_client(
+    api_app: FastAPI,
+) -> AsyncIterator[Callable[[], httpx.AsyncClient]]:
+    """Clients for api_app, each with its own cookie jar (i.e. its own user).
+
+    These run on the test's event loop, unlike TestClient, so the app can share
+    it with asyncpg. The https base URL matters: the session cookie is Secure
+    and wouldn't be sent back over http.
+    """
+    async with AsyncExitStack() as stack:
+
+        def make() -> httpx.AsyncClient:
+            client = httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=api_app),
+                base_url="https://testserver",
+            )
+            stack.push_async_callback(client.aclose)
+            return client
+
+        yield make
+
+
 @pytest.fixture
 def upstream_requests() -> list[httpx.Request]:
     return []
@@ -171,7 +237,7 @@ def make_client(
             settings=Settings(upstream_base_url="http://upstream.test"),
             transport=httpx.MockTransport(record),
         )
-        client = TestClient(app)
+        client = TestClient(skip_api_key_auth(app))
         client.__enter__()
         clients.append(client)
         return client
