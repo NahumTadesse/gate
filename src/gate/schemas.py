@@ -2,6 +2,7 @@ from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
+    ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
     model_serializer,
@@ -71,7 +72,12 @@ class ChatCompletionChunk(BaseModel):
 
 
 class ProxyRequest(BaseModel):
-    """The fields Gate reads for policy; the raw body is forwarded untouched."""
+    """The fields Gate reads for policy; the raw body is forwarded untouched.
+
+    Other fields are allowed (and documented as such); they're passed through.
+    """
+
+    model_config = ConfigDict(extra="allow")
 
     model: str
     stream: bool = False

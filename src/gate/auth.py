@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from gate.config import Settings
 from gate.db import get_session
+from gate.errors import ApiKeyError
 from gate.models import ApiKey, AuthSession, Membership, Role, User
 from gate.security import hash_token
 
@@ -55,15 +56,6 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[User, Depends(get_current_user)]
-
-
-class ApiKeyError(Exception):
-    """Raised for a missing or bad API key; rendered in the OpenAI error shape
-    that proxy clients expect."""
-
-    def __init__(self, message: str) -> None:
-        super().__init__(message)
-        self.message = message
 
 
 async def get_api_key(

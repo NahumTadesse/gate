@@ -1,50 +1,18 @@
 import hashlib
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 import pytest
+from conftest import Account, Signup
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from gate.models import ApiKey
 
 pytestmark = pytest.mark.anyio
 
-PASSWORD = "correct horse battery"
-
 MakeClient = Callable[[], httpx.AsyncClient]
 Sessionmaker = async_sessionmaker[AsyncSession]
-
-
-@dataclass
-class Account:
-    client: httpx.AsyncClient
-    user_id: str
-    email: str
-    org_id: str  # their personal org
-
-    def org(self, path: str = "") -> str:
-        return f"/api/v1/orgs/{self.org_id}{path}"
-
-
-Signup = Callable[[str], Awaitable[Account]]
-
-
-@pytest.fixture
-def signup(make_api_client: MakeClient) -> Signup:
-    async def signup(name: str) -> Account:
-        client = make_api_client()
-        email = f"{name}@example.com"
-        credentials = {"email": email, "password": PASSWORD}
-        user_id = (await client.post("/api/v1/auth/register", json=credentials)).json()[
-            "id"
-        ]
-        await client.post("/api/v1/auth/login", json=credentials)
-        [org] = (await client.get("/api/v1/me")).json()["orgs"]
-        return Account(client, user_id, email, org["id"])
-
-    return signup
 
 
 async def join(owner: Account, member: Account, role: str) -> None:

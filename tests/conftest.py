@@ -1,7 +1,8 @@
 import asyncio
 import os
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -215,6 +216,39 @@ async def make_api_client(
             return client
 
         yield make
+
+
+@dataclass
+class Account:
+    """A registered, logged-in user, with a client carrying their session."""
+
+    client: httpx.AsyncClient
+    user_id: str
+    email: str
+    org_id: str  # their personal org
+
+    def org(self, path: str = "") -> str:
+        return f"/api/v1/orgs/{self.org_id}{path}"
+
+
+Signup = Callable[[str], Awaitable[Account]]
+
+
+@pytest.fixture
+def signup(make_api_client: Callable[[], httpx.AsyncClient]) -> Signup:
+    """Registers and logs in <name>@example.com, owner of a personal org."""
+
+    async def signup(name: str) -> Account:
+        client = make_api_client()
+        email = f"{name}@example.com"
+        credentials = {"email": email, "password": "correct horse battery"}
+        response = await client.post("/api/v1/auth/register", json=credentials)
+        user_id = response.json()["id"]
+        await client.post("/api/v1/auth/login", json=credentials)
+        [org] = (await client.get("/api/v1/me")).json()["orgs"]
+        return Account(client, user_id, email, org["id"])
+
+    return signup
 
 
 @pytest.fixture

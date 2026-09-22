@@ -1,21 +1,24 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import AsyncExitStack, asynccontextmanager
-from typing import Annotated
+from typing import Annotated, Any, Literal
 
 import anyio
 import httpx
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from gate.api import router as api_router
-from gate.auth import ApiKeyError, get_api_key
+from gate.auth import get_api_key
 from gate.config import Settings
 from gate.db import create_engine, create_sessionmaker
-from gate.schemas import ProxyRequest
+from gate.errors import OpenAIError, error_body, install_error_handlers, openai_error
+from gate.reporting import router as reporting_router
+from gate.schemas import ChatCompletionResponse, ProxyRequest
 from gate.streaming import (
     SSE_HEADERS,
     SSEUsageParser,
@@ -29,6 +32,33 @@ UPSTREAM_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 JSON_HEADERS = {"content-type": "application/json"}
 READINESS_TIMEOUT = 2.0
+
+
+class Health(BaseModel):
+    status: Literal["ok"]
+
+
+class Readiness(BaseModel):
+    status: Literal["ok", "unavailable"]
+    checks: dict[str, Literal["up", "down"]]
+
+
+def proxy_error(description: str) -> dict[str, Any]:
+    return {"model": OpenAIError, "description": description}
+
+
+PROXY_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "model": ChatCompletionResponse,
+        "description": "The provider's completion. With `stream: true`, a "
+        "text/event-stream of chat.completion.chunk events instead.",
+        "content": {"text/event-stream": {"schema": {"type": "string"}}},
+    },
+    401: proxy_error("Missing, unknown or revoked API key"),
+    422: proxy_error("The body isn't a valid chat completion request"),
+    502: proxy_error("The provider couldn't be reached"),
+    504: proxy_error("The provider timed out"),
+}
 
 
 def get_http_client(request: Request) -> httpx.AsyncClient:
@@ -48,27 +78,12 @@ async def database_is_up(engine: AsyncEngine) -> bool:
     return True
 
 
-def upstream_error_body(message: str) -> dict[str, dict[str, str]]:
-    return {"error": {"message": message, "type": "upstream_error"}}
+def upstream_error_body(message: str) -> dict[str, Any]:
+    return error_body(message, "upstream_error")
 
 
 def upstream_error(status_code: int, message: str) -> JSONResponse:
-    return JSONResponse(status_code=status_code, content=upstream_error_body(message))
-
-
-def api_key_error(_: Request, exc: Exception) -> JSONResponse:
-    assert isinstance(exc, ApiKeyError)
-    return JSONResponse(
-        status_code=401,
-        content={
-            "error": {
-                "message": exc.message,
-                "type": "invalid_request_error",
-                "code": "invalid_api_key",
-            }
-        },
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+    return openai_error(status_code, message, "upstream_error")
 
 
 async def forward(client: httpx.AsyncClient, body: bytes) -> Response:
@@ -161,14 +176,20 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
     app.state.settings = settings
-    app.add_exception_handler(ApiKeyError, api_key_error)
+    install_error_handlers(app)
     app.include_router(api_router)
+    app.include_router(reporting_router)
 
-    @app.get("/healthz")
-    def healthz() -> dict[str, str]:
-        return {"status": "ok"}
+    @app.get("/healthz", tags=["health"])
+    def healthz() -> Health:
+        return Health(status="ok")
 
-    @app.get("/readyz")
+    @app.get(
+        "/readyz",
+        tags=["health"],
+        response_model=Readiness,
+        responses={503: {"model": Readiness, "description": "A dependency is down"}},
+    )
     async def readyz(request: Request) -> JSONResponse:
         if not await database_is_up(request.app.state.db_engine):
             return JSONResponse(
@@ -177,12 +198,23 @@ def create_app(
             )
         return JSONResponse({"status": "ok", "checks": {"database": "up"}})
 
-    @app.post(CHAT_COMPLETIONS_PATH, dependencies=[Depends(get_api_key)])
+    @app.post(
+        CHAT_COMPLETIONS_PATH,
+        dependencies=[Depends(get_api_key)],
+        tags=["proxy"],
+        responses=PROXY_RESPONSES,
+    )
     async def chat_completions(
         payload: ProxyRequest,
         request: Request,
         client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
     ) -> Response:
+        """OpenAI-compatible chat completions, forwarded to the provider.
+
+        The body is forwarded unchanged; Gate itself only reads `model` and
+        `stream`. Errors from the provider are passed through with its status
+        and body.
+        """
         body = await request.body()
         if payload.stream:
             return await forward_stream(client, body, request)

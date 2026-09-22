@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
@@ -37,7 +37,31 @@ INT8_MAX = 2**63 - 1
 # Bounds the argon2 work an anonymous request can ask for.
 PASSWORD_MAX_LENGTH = 256
 
-router = APIRouter(prefix="/api/v1")
+router = APIRouter(prefix="/api/v1", tags=["management"])
+
+
+class ErrorDetail(BaseModel):
+    """FastAPI's error body, used across the management API."""
+
+    detail: str
+
+
+def error(description: str) -> dict[str, Any]:
+    return {"model": ErrorDetail, "description": description}
+
+
+Responses = dict[int | str, dict[str, Any]]
+
+# Documented error responses, composed per route. 422 is added automatically.
+NOT_LOGGED_IN: Responses = {401: error("No valid session cookie")}
+IN_ORG: Responses = {
+    **NOT_LOGGED_IN,
+    404: error("Not a member of the organization, or it doesn't exist"),
+}
+WITH_ROLE: Responses = {
+    **IN_ORG,
+    403: error("A member, but without the required role"),
+}
 
 
 # --- schemas ---
@@ -123,7 +147,11 @@ def not_found(what: str) -> HTTPException:
     return HTTPException(status.HTTP_404_NOT_FOUND, f"{what} not found")
 
 
-@router.post("/auth/register", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/auth/register",
+    status_code=status.HTTP_201_CREATED,
+    responses={409: error("Email already registered")},
+)
 async def register(body: RegisterRequest, session: DbSession) -> UserOut:
     # Hash before touching the database so no transaction is held meanwhile.
     password_hash = await hash_password(body.password)
@@ -140,7 +168,7 @@ async def register(body: RegisterRequest, session: DbSession) -> UserOut:
     return UserOut.model_validate(user)
 
 
-@router.post("/auth/login")
+@router.post("/auth/login", responses={401: error("Invalid email or password")})
 async def login(
     body: LoginRequest,
     response: Response,
@@ -192,7 +220,7 @@ async def logout(
     response.delete_cookie(SESSION_COOKIE, httponly=True, secure=True, samesite="lax")
 
 
-@router.get("/me")
+@router.get("/me", responses=NOT_LOGGED_IN)
 async def me(user: CurrentUser, session: DbSession) -> MeOut:
     rows = await session.execute(
         select(Organization, Membership.role)
@@ -214,13 +242,13 @@ async def me(user: CurrentUser, session: DbSession) -> MeOut:
 # so a non-member gets 404 before anything about the org is looked up.
 
 
-@router.get("/orgs/{org_id}")
+@router.get("/orgs/{org_id}", responses=IN_ORG)
 async def get_org(membership: OrgMember, session: DbSession) -> OrgOut:
     org = await session.get_one(Organization, membership.org_id)
     return OrgOut(id=org.id, name=org.name, role=membership.role)
 
 
-@router.get("/orgs/{org_id}/members")
+@router.get("/orgs/{org_id}/members", responses=IN_ORG)
 async def list_members(membership: OrgMember, session: DbSession) -> list[MemberOut]:
     rows = await session.execute(
         select(Membership, User.email)
@@ -239,7 +267,15 @@ async def list_members(membership: OrgMember, session: DbSession) -> list[Member
     ]
 
 
-@router.post("/orgs/{org_id}/members", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/orgs/{org_id}/members",
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        **WITH_ROLE,
+        404: error("No such organization for this user, or no user with that email"),
+        409: error("User is already a member"),
+    },
+)
 async def add_member(
     body: MemberIn, membership: OrgOwner, session: DbSession
 ) -> MemberOut:
@@ -288,7 +324,14 @@ async def get_member(
     return member
 
 
-@router.patch("/orgs/{org_id}/members/{user_id}")
+@router.patch(
+    "/orgs/{org_id}/members/{user_id}",
+    responses={
+        **WITH_ROLE,
+        404: error("No such organization for this user, or no such member"),
+        409: error("It would leave the organization without an owner"),
+    },
+)
 async def update_member_role(
     user_id: uuid.UUID, body: RoleUpdate, membership: OrgOwner, session: DbSession
 ) -> MemberOut:
@@ -308,7 +351,13 @@ async def update_member_role(
 
 
 @router.delete(
-    "/orgs/{org_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT
+    "/orgs/{org_id}/members/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        **WITH_ROLE,
+        404: error("No such organization for this user, or no such member"),
+        409: error("It would leave the organization without an owner"),
+    },
 )
 async def remove_member(
     user_id: uuid.UUID, membership: OrgOwner, session: DbSession
@@ -324,7 +373,7 @@ async def remove_member(
 # --- API keys ---
 
 
-@router.get("/orgs/{org_id}/keys")
+@router.get("/orgs/{org_id}/keys", responses=IN_ORG)
 async def list_keys(membership: OrgMember, session: DbSession) -> list[ApiKeyOut]:
     keys = await session.scalars(
         select(ApiKey)
@@ -334,7 +383,9 @@ async def list_keys(membership: OrgMember, session: DbSession) -> list[ApiKeyOut
     return [ApiKeyOut.model_validate(key) for key in keys]
 
 
-@router.post("/orgs/{org_id}/keys", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/orgs/{org_id}/keys", status_code=status.HTTP_201_CREATED, responses=WITH_ROLE
+)
 async def create_key(
     body: ApiKeyIn, membership: OrgAdmin, session: DbSession
 ) -> CreatedApiKeyOut:
@@ -353,7 +404,14 @@ async def create_key(
     return CreatedApiKeyOut(**ApiKeyOut.model_validate(key).model_dump(), key=plaintext)
 
 
-@router.delete("/orgs/{org_id}/keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/orgs/{org_id}/keys/{key_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        **WITH_ROLE,
+        404: error("No such organization for this user, or no such key in it"),
+    },
+)
 async def revoke_key(
     key_id: uuid.UUID, membership: OrgAdmin, session: DbSession
 ) -> None:
