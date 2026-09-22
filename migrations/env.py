@@ -6,6 +6,7 @@ from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from gate import models  # noqa: F401  (registers the tables on Base.metadata)
 from gate.config import Settings
 from gate.db import Base
 

@@ -22,6 +22,10 @@ NAMING_CONVENTION = {
 
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
+    # Fetch server defaults (e.g. created_at) via RETURNING on insert; reading
+    # them later would otherwise need a lazy refresh, which asyncio can't do.
+    # (Not a ClassVar: DeclarativeBase already declares the attribute.)
+    __mapper_args__ = {"eager_defaults": True}  # noqa: RUF012
 
 
 def create_engine(url: str) -> AsyncEngine:
