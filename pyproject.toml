@@ -32,5 +32,16 @@ dev = [
     "httpx>=0.28.1",
     "mypy>=2.3.1",
     "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.16.8",
 ]
+
+[tool.pytest.ini_options]
+# Parallel by default; each worker gets its own test database (see conftest).
+# Capped because past ~8 workers startup cost outweighs the gain here.
+addopts = "-n auto --maxprocesses 8"
+
+[tool.mypy]
+# Knows that BaseSettings fields come from the environment, so Settings()
+# needn't pass required ones like secret_key.
+plugins = ["pydantic.mypy"]

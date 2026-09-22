@@ -9,6 +9,7 @@ import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from argon2 import PasswordHasher, profiles
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -23,15 +24,48 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 from uuid_utils.compat import uuid7
 
+from gate import (
+    models,  # noqa: F401  (registers the tables on Base.metadata)
+    security,
+)
 from gate.auth import get_api_key
 from gate.config import Settings
-from gate.db import create_engine, create_sessionmaker
+from gate.db import Base, create_sessionmaker
 from gate.main import create_app
 from gate.models import ApiKey
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
 ROOT = Path(__file__).resolve().parent.parent
+
+
+TEST_SECRET_KEY = "test-secret-key-" + "x" * 32
+
+
+@pytest.fixture(autouse=True, scope="session")
+def secret_key_env() -> Iterator[None]:
+    """Run tests as production does: a SECRET_KEY set, and DEV not."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setenv("SECRET_KEY", TEST_SECRET_KEY)
+        patch.delenv("DEV", raising=False)
+        yield
+
+
+@pytest.fixture(autouse=True, scope="session")
+def cheap_password_hashing() -> Iterator[None]:
+    """Hash passwords with argon2's cheapest parameters during tests.
+
+    Production's parameters cost ~180ms per hash on purpose, which dominated
+    the suite's runtime. The algorithm (argon2id) and code path are unchanged;
+    only the work factors drop, and only here.
+    """
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(
+            security, "_hasher", PasswordHasher.from_parameters(profiles.CHEAPEST)
+        )
+        security._dummy_hash.cache_clear()
+        yield
+    security._dummy_hash.cache_clear()
 
 
 class DatabaseTestSettings(BaseSettings):
@@ -65,34 +99,38 @@ async def create_database_if_missing(url: str) -> None:
         await admin.dispose()
 
 
-async def truncate_tables(engine: AsyncEngine) -> None:
-    """Empty every table in the schema except Alembic's version bookkeeping."""
-    async with engine.begin() as connection:
-        names = (
-            await connection.scalars(
-                text(
-                    "SELECT tablename FROM pg_tables"
-                    " WHERE schemaname = current_schema()"
-                    " AND tablename <> 'alembic_version'"
-                )
-            )
-        ).all()
-        if names:
-            quote = connection.dialect.identifier_preparer.quote
-            tables = ", ".join(quote(name) for name in names)
-            await connection.execute(
-                text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE")
-            )
+async def clear_tables(engine: AsyncEngine) -> None:
+    """Delete every row from the models' tables, children before parents.
+
+    This runs around every committed-state test, so it's built to be cheap:
+    DELETE rather than TRUNCATE (which replaces each table's files, ~85ms even
+    for tiny tables), and all of them sent as one simple query, one round trip.
+    """
+    statements = "; ".join(
+        f'DELETE FROM "{table.name}"' for table in reversed(Base.metadata.sorted_tables)
+    )
+    async with engine.connect() as connection:
+        driver = (await connection.get_raw_connection()).driver_connection
+        assert driver is not None
+        # A multi-statement simple query runs as a single implicit transaction.
+        await driver.execute(statements)
 
 
 @pytest.fixture(scope="session")
-def test_database_url() -> str:
+def test_database_url(worker_id: str) -> str:
     """The migrated test database.
+
+    Each pytest-xdist worker gets a database of its own (gate_test_gw0, ...),
+    created and migrated on first use, so parallel tests can't see or delete
+    each other's rows. Without xdist the configured name is used as is.
 
     Tests needing it skip if Postgres is down, except in CI (the CI environment
     variable is set), where an unreachable database fails them instead.
     """
-    url = DatabaseTestSettings().test_database_url
+    configured = make_url(DatabaseTestSettings().test_database_url)
+    if worker_id != "master":
+        configured = configured.set(database=f"{configured.database}_{worker_id}")
+    url = configured.render_as_string(hide_password=False)
     try:
         asyncio.run(create_database_if_missing(url))
     except (SQLAlchemyError, OSError) as exc:
@@ -108,8 +146,33 @@ def test_database_url() -> str:
     return url
 
 
+@pytest.fixture(scope="session")
+def anyio_backend() -> str:
+    # Session-scoped so the whole run shares one event loop, which lets the
+    # engine below (whose connections belong to a loop) be shared too.
+    return "asyncio"
+
+
+@pytest.fixture(scope="session")
+async def test_engine(test_database_url: str) -> AsyncIterator[AsyncEngine]:
+    """One pooled engine for the whole run.
+
+    Opening a connection costs ~60ms here (auth plus SQLAlchemy's startup
+    queries), and asyncpg caches prepared statements per connection, so reusing
+    connections across tests is most of what keeps the suite fast.
+    """
+    # No pool_pre_ping, unlike production (it costs a round trip per checkout):
+    # nothing here drops connections behind the pool's back, and the migration
+    # test, which invalidates them, resets the pool itself.
+    engine = create_async_engine(test_database_url)
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
+
+
 @pytest.fixture
-async def db_session(test_database_url: str) -> AsyncIterator[AsyncSession]:
+async def db_session(test_engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     """A session inside a transaction that is rolled back after the test.
 
     Commits made by the code under test only release a savepoint, so nothing
@@ -118,43 +181,35 @@ async def db_session(test_database_url: str) -> AsyncIterator[AsyncSession]:
     transactions (concurrent writers, SELECT ... FOR UPDATE blocking, constraint
     violations between sessions); use ``committed_sessionmaker`` for those.
     """
-    engine = create_async_engine(test_database_url, poolclass=NullPool)
-    try:
-        async with engine.connect() as connection:
-            transaction = await connection.begin()
-            session = AsyncSession(
-                bind=connection,
-                join_transaction_mode="create_savepoint",
-                expire_on_commit=False,
-            )
-            try:
-                yield session
-            finally:
-                await session.close()
-                await transaction.rollback()
-    finally:
-        await engine.dispose()
+    async with test_engine.connect() as connection:
+        transaction = await connection.begin()
+        session = AsyncSession(
+            bind=connection,
+            join_transaction_mode="create_savepoint",
+            expire_on_commit=False,
+        )
+        try:
+            yield session
+        finally:
+            await session.close()
+            await transaction.rollback()
 
 
 @pytest.fixture
 async def committed_sessionmaker(
-    test_database_url: str,
+    test_engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     """A sessionmaker whose sessions commit for real, in separate transactions.
 
     Each session gets its own pooled connection, so a test can run several
     concurrently and see locking and isolation as production would. Tables are
-    truncated before and after the test. It is slower than ``db_session``, so
+    emptied before and after the test. It is slower than ``db_session``, so
     use it only for tests that need more than one transaction; everything else
     should use ``db_session``.
     """
-    engine = create_engine(test_database_url)
-    try:
-        await truncate_tables(engine)
-        yield create_sessionmaker(engine)
-        await truncate_tables(engine)
-    finally:
-        await engine.dispose()
+    await clear_tables(test_engine)
+    yield create_sessionmaker(test_engine)
+    await clear_tables(test_engine)
 
 
 def skip_api_key_auth(app: FastAPI) -> FastAPI:
@@ -170,6 +225,7 @@ def skip_api_key_auth(app: FastAPI) -> FastAPI:
 @pytest.fixture
 async def api_app(
     test_database_url: str,
+    test_engine: AsyncEngine,
     committed_sessionmaker: async_sessionmaker[AsyncSession],
     upstream_requests: list[httpx.Request],
 ) -> AsyncIterator[FastAPI]:
@@ -192,6 +248,10 @@ async def api_app(
         transport=httpx.MockTransport(record),
     )
     async with app.router.lifespan_context(app):
+        # Serve from the shared engine rather than the one the lifespan made,
+        # so requests reuse warm connections.
+        app.state.db_engine = test_engine
+        app.state.sessionmaker = committed_sessionmaker
         yield app
 
 
