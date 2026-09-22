@@ -62,8 +62,8 @@ async def test_defaults_are_applied(db_session: AsyncSession) -> None:
         ("api_keys", "org_id", "fk_api_keys_org_id_organizations"),
         ("requests", "org_id", "fk_requests_api_key_id_org_id_api_keys"),
         ("requests", "api_key_id", "fk_requests_api_key_id_org_id_api_keys"),
-        ("usage_rollups", "org_id", "fk_usage_rollups_org_id_organizations"),
-        ("usage_rollups", "api_key_id", "fk_usage_rollups_api_key_id_api_keys"),
+        ("usage_rollups", "org_id", "fk_usage_rollups_api_key_id_org_id_api_keys"),
+        ("usage_rollups", "api_key_id", "fk_usage_rollups_api_key_id_org_id_api_keys"),
     ],
 )
 async def test_foreign_keys_are_enforced(
@@ -105,6 +105,27 @@ async def test_request_with_another_orgs_key_is_rejected(
         RequestLog(**request_row(key, uuid.uuid4(), org_id=other_key.org_id))
     )
     with pytest.raises(IntegrityError, match="fk_requests_api_key_id_org_id_api_keys"):
+        await db_session.flush()
+
+
+async def test_rollup_with_another_orgs_key_is_rejected(
+    db_session: AsyncSession,
+) -> None:
+    key, other_key = await make_key(db_session), await make_key(db_session)
+    assert key.org_id != other_key.org_id
+
+    # Both ids exist, so separate FKs on each column would accept this row.
+    db_session.add(
+        UsageRollup(
+            api_key_id=key.id,
+            model="gpt-test",
+            bucket_start=BUCKET,
+            org_id=other_key.org_id,
+        )
+    )
+    with pytest.raises(
+        IntegrityError, match="fk_usage_rollups_api_key_id_org_id_api_keys"
+    ):
         await db_session.flush()
 
 

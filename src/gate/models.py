@@ -199,6 +199,12 @@ class UsageRollup(Base):
 
     __tablename__ = "usage_rollups"
     __table_args__ = (
+        # Same composite target as requests: the key must belong to org_id.
+        ForeignKeyConstraint(
+            ["api_key_id", "org_id"],
+            ["api_keys.id", "api_keys.org_id"],
+            name="fk_usage_rollups_api_key_id_org_id_api_keys",
+        ),
         # Epoch seconds rather than date_trunc('hour', ...), which depends on the
         # session time zone (and so is wrong for offsets like +05:30).
         CheckConstraint(
@@ -206,16 +212,12 @@ class UsageRollup(Base):
         ),
     )
 
-    api_key_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("api_keys.id"), primary_key=True
-    )
+    api_key_id: Mapped[uuid.UUID] = mapped_column(primary_key=True)
     model: Mapped[str] = mapped_column(Text, primary_key=True)
     bucket_start: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), primary_key=True
     )
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("organizations.id"), nullable=False
-    )
+    org_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     request_count: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
