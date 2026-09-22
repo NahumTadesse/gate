@@ -6,10 +6,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     SmallInteger,
     Text,
+    UniqueConstraint,
     false,
     func,
     text,
@@ -123,6 +125,11 @@ class AuthSession(Base):
 
 class ApiKey(Base):
     __tablename__ = "api_keys"
+    __table_args__ = (
+        # Redundant with the primary key on its own; it exists as the target of
+        # the composite foreign key on requests, which pins a key to its org.
+        UniqueConstraint("id", "org_id", name="uq_api_keys_id_org_id"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     org_id: Mapped[uuid.UUID] = mapped_column(
@@ -151,6 +158,14 @@ class RequestLog(Base):
 
     __tablename__ = "requests"
     __table_args__ = (
+        # One constraint over both columns, so a request can't name a key that
+        # belongs to a different org. org_id needs no FK of its own: api_keys
+        # already guarantees the org exists.
+        ForeignKeyConstraint(
+            ["api_key_id", "org_id"],
+            ["api_keys.id", "api_keys.org_id"],
+            name="fk_requests_api_key_id_org_id_api_keys",
+        ),
         Index("ix_requests_org_id_created_at", "org_id", text("created_at DESC")),
         Index(
             "ix_requests_api_key_id_created_at", "api_key_id", text("created_at DESC")
@@ -160,12 +175,8 @@ class RequestLog(Base):
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid7)
     # Idempotency key: the usage pipeline inserts with ON CONFLICT DO NOTHING.
     request_id: Mapped[uuid.UUID] = mapped_column(unique=True, nullable=False)
-    org_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("organizations.id"), nullable=False
-    )
-    api_key_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("api_keys.id"), nullable=False
-    )
+    org_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
+    api_key_id: Mapped[uuid.UUID] = mapped_column(nullable=False)
     model: Mapped[str] = mapped_column(Text, nullable=False)
     provider: Mapped[str] = mapped_column(Text, nullable=False)
     status_code: Mapped[int] = mapped_column(SmallInteger, nullable=False)

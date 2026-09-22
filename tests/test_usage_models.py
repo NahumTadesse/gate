@@ -57,17 +57,17 @@ async def test_defaults_are_applied(db_session: AsyncSession) -> None:
 
 
 @pytest.mark.parametrize(
-    ("table", "constraint"),
+    ("table", "column", "constraint"),
     [
-        ("api_keys", "fk_api_keys_org_id_organizations"),
-        ("requests", "fk_requests_org_id_organizations"),
-        ("requests", "fk_requests_api_key_id_api_keys"),
-        ("usage_rollups", "fk_usage_rollups_org_id_organizations"),
-        ("usage_rollups", "fk_usage_rollups_api_key_id_api_keys"),
+        ("api_keys", "org_id", "fk_api_keys_org_id_organizations"),
+        ("requests", "org_id", "fk_requests_api_key_id_org_id_api_keys"),
+        ("requests", "api_key_id", "fk_requests_api_key_id_org_id_api_keys"),
+        ("usage_rollups", "org_id", "fk_usage_rollups_org_id_organizations"),
+        ("usage_rollups", "api_key_id", "fk_usage_rollups_api_key_id_api_keys"),
     ],
 )
 async def test_foreign_keys_are_enforced(
-    db_session: AsyncSession, table: str, constraint: str
+    db_session: AsyncSession, table: str, column: str, constraint: str
 ) -> None:
     key = await make_key(db_session)
     missing = uuid.uuid4()
@@ -88,12 +88,24 @@ async def test_foreign_keys_are_enforced(
         },
     }
     row = rows[table]
-    # Break exactly the reference this case is about.
-    column = "api_key_id" if constraint.endswith("_api_keys") else "org_id"
     row[column] = missing
 
     with pytest.raises(IntegrityError, match=constraint):
         await db_session.execute(insert(Base.metadata.tables[table]).values(row))
+
+
+async def test_request_with_another_orgs_key_is_rejected(
+    db_session: AsyncSession,
+) -> None:
+    key, other_key = await make_key(db_session), await make_key(db_session)
+    assert key.org_id != other_key.org_id
+
+    # Both ids exist, so separate FKs on each column would accept this row.
+    db_session.add(
+        RequestLog(**request_row(key, uuid.uuid4(), org_id=other_key.org_id))
+    )
+    with pytest.raises(IntegrityError, match="fk_requests_api_key_id_org_id_api_keys"):
+        await db_session.flush()
 
 
 async def test_request_id_is_unique(db_session: AsyncSession) -> None:
