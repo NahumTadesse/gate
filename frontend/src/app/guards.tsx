@@ -4,8 +4,14 @@ import { Link, Navigate, Outlet, useLocation, useNavigate, useParams } from 'rea
 import { isApiError, onUnauthorized } from '../api/client'
 import { useMe } from '../api/hooks'
 import { ErrorState } from '../components/states'
+import { LandingPage } from '../pages/LandingPage'
 import { OrgContext } from './org'
 import { AppShell } from './AppShell'
+
+// Pages a signed-out visitor may stay on. A 401 there is expected (the home
+// page asks /me to decide what to show), not a sign the session ended, and
+// clearing the cache would drop that very query.
+const PUBLIC_PATHS = new Set(['/', '/login', '/register'])
 
 /** Sends the user to /login whenever the API says the session is gone. */
 export function UnauthorizedRedirect() {
@@ -16,10 +22,9 @@ export function UnauthorizedRedirect() {
   useEffect(
     () =>
       onUnauthorized(() => {
+        if (PUBLIC_PATHS.has(location.pathname)) return
         client.clear()
-        if (location.pathname !== '/login' && location.pathname !== '/register') {
-          navigate('/login', { replace: true, state: { from: location.pathname + location.search } })
-        }
+        navigate('/login', { replace: true, state: { from: location.pathname + location.search } })
       }),
     [client, location, navigate],
   )
@@ -45,6 +50,22 @@ export function RequireAuth() {
     )
   }
   return <Outlet context={me.data} />
+}
+
+/** The landing page for visitors; signed-in users go on to their dashboard. */
+export function Home() {
+  const me = useMe()
+
+  if (me.data) {
+    return <HomeRedirect />
+  }
+  // Any failure, not just a 401, gets the landing page: it needs no API. It
+  // shows after the first failed attempt rather than waiting out the retries
+  // of a server error; if a retry does find a session, the redirect follows.
+  if (me.isError || me.failureCount > 0) {
+    return <LandingPage />
+  }
+  return <div role="status" aria-label="Loading" className="auth" />
 }
 
 export function HomeRedirect() {

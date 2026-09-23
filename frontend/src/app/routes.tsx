@@ -4,7 +4,7 @@ import { LoginPage, RegisterPage } from '../pages/AuthPages'
 import { MembersPage } from '../pages/MembersPage'
 import { OverviewPage } from '../pages/OverviewPage'
 import { RequestsPage } from '../pages/RequestsPage'
-import { HomeRedirect, OrgLayout, RequireAuth, UnauthorizedRedirect } from './guards'
+import { Home, HomeRedirect, OrgLayout, RequireAuth, UnauthorizedRedirect } from './guards'
 
 export const routes: RouteObject[] = [
   {
@@ -12,10 +12,10 @@ export const routes: RouteObject[] = [
     children: [
       { path: '/login', element: <LoginPage /> },
       { path: '/register', element: <RegisterPage /> },
+      { path: '/', element: <Home /> },
       {
         element: <RequireAuth />,
         children: [
-          { path: '/', element: <HomeRedirect /> },
           {
             path: '/orgs/:orgId',
             element: <OrgLayout />,

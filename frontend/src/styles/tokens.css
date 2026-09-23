@@ -64,6 +64,10 @@
   --fs-lg: 15px;
   --fs-xl: 18px;
   --fs-stat: 20px;
+  /* Marketing pages only; the dashboard tops out at --fs-stat. */
+  --fs-2xl: 24px;
+  --fs-3xl: 32px;
+  --fs-display: clamp(34px, 4vw, 46px);
 
   --radius: 6px;
   --radius-sm: 4px;
@@ -77,6 +81,7 @@
   --row-height: 32px;
   --control-height: 28px;
   --control-height-sm: 24px;
+  --control-height-lg: 40px;
   --sidebar-width: 208px;
 }
 
