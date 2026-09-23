@@ -1,0 +1,92 @@
+/*
+ * One set of tokens drives both themes. Dark is the default (bare :root);
+ * light overrides the same names under [data-theme="light"]. Components only
+ * ever read these variables, never literal colors.
+ *
+ * One accent hue (blue). Every text/fill pair here clears WCAG AA (4.5:1 for
+ * text, 3:1 for control borders) on its surface in both themes.
+ */
+:root {
+  color-scheme: dark;
+
+  --bg: #0e1013;
+  --surface: #15171a;
+  --surface-2: #1b1e22;
+  --surface-3: #23272c;
+  --border: #262a30;
+  --border-input: #666c77;
+
+  --text: #e6e8eb;
+  --text-2: #a4aab4;
+  --text-3: #80868f;
+
+  --accent: #3987e5; /* marks: chart line, focus ring, selection */
+  --accent-fill: #2f6fc4; /* filled buttons, with --on-accent text */
+  --accent-fill-hover: #3a7bd0;
+  --accent-text: #6aa6ee; /* links and accent text */
+  --accent-wash: rgb(57 135 229 / 12%);
+  --on-accent: #ffffff;
+
+  --danger-fill: #c23a3a;
+  --danger-fill-hover: #cf4646;
+  --danger-text: #f08a8a;
+  --danger-wash: rgb(208 59 59 / 12%);
+
+  /* Status marks (dataviz status set). Always paired with a text label. */
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
+
+  --chart-grid: #262a30;
+  --chart-area: rgb(57 135 229 / 10%);
+
+  --font-sans: 'Geist Variable', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'Geist Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --fs-xs: 11px;
+  --fs-sm: 12px;
+  --fs-md: 13px;
+  --fs-lg: 15px;
+  --fs-xl: 20px;
+
+  --radius: 6px;
+  --radius-sm: 4px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+
+  --row-height: 32px;
+  --control-height: 28px;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: #f5f6f8;
+  --surface: #fdfdfe;
+  --surface-2: #f1f3f6;
+  --surface-3: #e8ebef;
+  --border: #e1e4e9;
+  --border-input: #8b929c;
+
+  --text: #15181d;
+  --text-2: #4a515c;
+  --text-3: #646b76;
+
+  --accent: #2a78d6;
+  --accent-fill: #2166c0;
+  --accent-fill-hover: #1c5aab;
+  --accent-text: #1f63b8;
+  --accent-wash: rgb(42 120 214 / 10%);
+
+  --danger-fill: #c23a3a;
+  --danger-fill-hover: #ad3131;
+  --danger-text: #b23131;
+  --danger-wash: rgb(208 59 59 / 8%);
+
+  --chart-grid: #e1e4e9;
+  --chart-area: rgb(42 120 214 / 10%);
+}

@@ -1,32 +1,35 @@
-# React + TypeScript + Vite
+# Gate dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React dashboard for Gate: sign in, org overview (spend and recent activity),
+API keys, the request log and members.
 
-Currently, two official plugins are available:
+Vite, React, TypeScript, TanStack Query, React Router, react-hook-form with
+zod, and Recharts. Tests use Vitest, React Testing Library and MSW.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Development
 
-## React Compiler
+Run the API on port 8000 (see the root README), then:
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```sh
+npm install
+npm run dev
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Vite proxies `/api` to `http://127.0.0.1:8000`, so the session cookie is
+same-origin in development.
+
+## API types
+
+The types in `src/api/schema.d.ts` are generated from the backend's OpenAPI
+document; don't edit them by hand. After changing the API:
+
+```sh
+npm run gen:api     # rewrite openapi.json and src/api/schema.d.ts
+npm run check:api   # fail if they're out of date
+```
+
+## Checks
+
+```sh
+npm run check       # lint, typecheck, tests, build
+```
