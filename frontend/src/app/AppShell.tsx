@@ -57,7 +57,12 @@ export function AppShell({ children }: { children: ReactNode }) {
         )}
         <nav className="nav" aria-label="Organization">
           {NAV.map((item) => (
-            <NavLink key={item.label} to={`/orgs/${org.id}/${item.to}`} end={item.end}>
+            <NavLink
+              key={item.label}
+              // No trailing slash for Overview: "/orgs/x/" never matches "/orgs/x".
+              to={item.to ? `/orgs/${org.id}/${item.to}` : `/orgs/${org.id}`}
+              end={item.end}
+            >
               {item.label}
             </NavLink>
           ))}
