@@ -5,12 +5,13 @@ import logging
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 import pytest
 from conftest import Handler, Signup, Upstream
 from fastapi import FastAPI
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -362,12 +363,59 @@ async def test_database_failure_while_recording_does_not_break_the_response(
 # --- development seed ---
 
 
-async def test_dev_seed_prices_the_mock_models_and_can_rerun(
+async def test_dev_seed_makes_a_month_of_consistent_traffic(
     test_database_url: str, committed_sessionmaker: Sessions
 ) -> None:
-    await dev_seed.seed(test_database_url)
-    await dev_seed.seed(test_database_url)
+    now = datetime(2026, 9, 23, 12, tzinfo=UTC)
 
-    async with committed_sessionmaker() as session:
-        models = await session.scalars(select(ModelPrice.model))
-        assert sorted(models) == sorted(model for model, *_ in dev_seed.MOCK_PRICES)
+    async def snapshot() -> tuple[Any, Any, set[int], list[ApiKey], set[str]]:
+        async with committed_sessionmaker() as session:
+            requests = (
+                await session.execute(
+                    select(
+                        func.count(),
+                        func.sum(
+                            RequestLog.prompt_tokens + RequestLog.completion_tokens
+                        ),
+                        func.sum(RequestLog.cost_micros),
+                        func.min(RequestLog.created_at),
+                        func.max(RequestLog.created_at),
+                    )
+                )
+            ).one()
+            rollups = (
+                await session.execute(
+                    select(
+                        func.sum(UsageRollup.request_count),
+                        func.sum(UsageRollup.tokens),
+                        func.sum(UsageRollup.cost_micros),
+                    )
+                )
+            ).one()
+            statuses = set(await session.scalars(select(RequestLog.status_code)))
+            keys = list(await session.scalars(select(ApiKey).order_by(ApiKey.name)))
+            prices = set(await session.scalars(select(ModelPrice.model)))
+        return tuple(requests), tuple(rollups), statuses, keys, prices
+
+    await dev_seed.seed(test_database_url, now)
+    first = await snapshot()
+    await dev_seed.seed(test_database_url, now)
+    second = await snapshot()
+
+    (count, tokens, cost, earliest, latest), rollups, statuses, keys, prices = second
+    assert count == dev_seed.REQUEST_COUNT
+    assert rollups == (count, tokens, cost)
+    assert cost > 0
+    assert now - timedelta(days=30) <= earliest < latest <= now
+    assert statuses == {200, 429, 502}
+    assert prices == {model for model, *_ in dev_seed.MOCK_PRICES}
+    assert [
+        (k.name, k.rpm_limit, k.monthly_budget_micros, k.last_used_at is not None)
+        for k in keys
+    ] == [
+        ("ci", 30, None, True),
+        ("production", 600, 500_000_000, True),
+        ("staging", 120, 50_000_000, True),
+    ]
+    # Rerunning replaces the traffic rather than adding to it.
+    assert second[:3] == first[:3]
