@@ -1,5 +1,6 @@
+import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Annotated, Any, Literal
 
@@ -17,6 +18,7 @@ from gate.auth import get_api_key
 from gate.config import Settings
 from gate.db import create_engine, create_sessionmaker
 from gate.errors import OpenAIError, error_body, install_error_handlers, openai_error
+from gate.models import ApiKey
 from gate.reporting import router as reporting_router
 from gate.schemas import ChatCompletionResponse, ProxyRequest
 from gate.streaming import (
@@ -25,6 +27,7 @@ from gate.streaming import (
     UpstreamStreamingResponse,
     sse_event,
 )
+from gate.usage import UsageRecorder, get_usage_recorder
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,10 @@ UPSTREAM_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
 CHAT_COMPLETIONS_PATH = "/v1/chat/completions"
 JSON_HEADERS = {"content-type": "application/json"}
 READINESS_TIMEOUT = 2.0
+
+# Records the finished request: its status, the upstream usage object (if
+# any), and whether it was relayed as an SSE stream.
+Record = Callable[[int, object, bool], Awaitable[None]]
 
 
 class Health(BaseModel):
@@ -86,15 +93,26 @@ def upstream_error(status_code: int, message: str) -> JSONResponse:
     return openai_error(status_code, message, "upstream_error")
 
 
-async def forward(client: httpx.AsyncClient, body: bytes) -> Response:
+def response_usage(body: bytes) -> object:
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return None
+    return payload.get("usage") if isinstance(payload, dict) else None
+
+
+async def forward(client: httpx.AsyncClient, body: bytes, record: Record) -> Response:
     try:
         upstream = await client.post(
             CHAT_COMPLETIONS_PATH, content=body, headers=JSON_HEADERS
         )
     except httpx.TimeoutException:
+        await record(504, None, False)
         return upstream_error(504, "Upstream provider timed out")
     except httpx.HTTPError:
+        await record(502, None, False)
         return upstream_error(502, "Upstream provider unavailable")
+    await record(upstream.status_code, response_usage(upstream.content), False)
     return Response(
         content=upstream.content,
         status_code=upstream.status_code,
@@ -103,7 +121,7 @@ async def forward(client: httpx.AsyncClient, body: bytes) -> Response:
 
 
 async def forward_stream(
-    client: httpx.AsyncClient, body: bytes, request: Request
+    client: httpx.AsyncClient, body: bytes, record: Record
 ) -> Response:
     async with AsyncExitStack() as stack:
         # Everything up to and including the first body chunk can still fail
@@ -116,6 +134,9 @@ async def forward_stream(
             )
             if not upstream.is_success:
                 await upstream.aread()
+                await record(
+                    upstream.status_code, response_usage(upstream.content), False
+                )
                 return Response(
                     content=upstream.content,
                     status_code=upstream.status_code,
@@ -124,8 +145,10 @@ async def forward_stream(
             chunks = upstream.aiter_bytes()
             first = await anext(chunks, b"")
         except httpx.TimeoutException:
+            await record(504, None, False)
             return upstream_error(504, "Upstream provider timed out")
         except httpx.HTTPError:
+            await record(502, None, False)
             return upstream_error(502, "Upstream provider unavailable")
 
         parser = SSEUsageParser()
@@ -142,13 +165,22 @@ async def forward_stream(
                 if not parser.at_event_boundary:
                     yield b"\n\n"
                 yield sse_event(upstream_error_body("Upstream stream interrupted"))
-            request.state.usage = parser.usage
+
+        close_upstream = stack.pop_all().aclose
+
+        async def finish() -> None:
+            # Runs however the stream ended, including a client disconnect, in
+            # which case usage is whatever had arrived (usually none).
+            try:
+                await close_upstream()
+            finally:
+                await record(200, parser.usage, True)
 
         return UpstreamStreamingResponse(
             relay(),
             media_type="text/event-stream",
             headers=SSE_HEADERS,
-            close_upstream=stack.pop_all().aclose,
+            on_close=finish,
         )
 
 
@@ -198,15 +230,12 @@ def create_app(
             )
         return JSONResponse({"status": "ok", "checks": {"database": "up"}})
 
-    @app.post(
-        CHAT_COMPLETIONS_PATH,
-        dependencies=[Depends(get_api_key)],
-        tags=["proxy"],
-        responses=PROXY_RESPONSES,
-    )
+    @app.post(CHAT_COMPLETIONS_PATH, tags=["proxy"], responses=PROXY_RESPONSES)
     async def chat_completions(
         payload: ProxyRequest,
         request: Request,
+        key: Annotated[ApiKey, Depends(get_api_key)],
+        recorder: Annotated[UsageRecorder, Depends(get_usage_recorder)],
         client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
     ) -> Response:
         """OpenAI-compatible chat completions, forwarded to the provider.
@@ -216,8 +245,18 @@ def create_app(
         and body.
         """
         body = await request.body()
+
+        async def record(status_code: int, usage: object, streamed: bool) -> None:
+            await recorder.record(
+                key=key,
+                model=payload.model,
+                status_code=status_code,
+                usage=usage,
+                streamed=streamed,
+            )
+
         if payload.stream:
-            return await forward_stream(client, body, request)
-        return await forward(client, body)
+            return await forward_stream(client, body, record)
+        return await forward(client, body, record)
 
     return app

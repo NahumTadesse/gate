@@ -5,7 +5,7 @@ from typing import Any
 import anyio
 import httpx
 import pytest
-from conftest import skip_api_key_auth
+from conftest import RecordedCall, skip_api_key_auth
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
@@ -210,12 +210,14 @@ def anyio_backend() -> str:
     return "asyncio"
 
 
-def make_app(stream: UpstreamStream) -> FastAPI:
+def make_app(
+    stream: UpstreamStream, recorded: list[RecordedCall] | None = None
+) -> FastAPI:
     app = create_app(
         settings=Settings(upstream_base_url="http://upstream.test"),
         transport=httpx.MockTransport(lambda _: sse_response(stream)),
     )
-    return skip_api_key_auth(app)
+    return skip_api_key_auth(app, recorded)
 
 
 def http_scope(spec_version: str) -> dict[str, Any]:
@@ -325,9 +327,9 @@ async def test_client_disconnect_detected_on_write_cancels_upstream() -> None:
 
 
 @pytest.mark.anyio
-async def test_usage_is_recorded_on_request_state() -> None:
+async def test_usage_is_recorded_when_the_stream_ends() -> None:
     stream = UpstreamStream(CHUNKS)
-    scope = http_scope("2.3")
+    recorded: list[RecordedCall] = []
     done = anyio.Event()
     sent: list[Message] = []
 
@@ -336,10 +338,32 @@ async def test_usage_is_recorded_on_request_state() -> None:
         if message["type"] == "http.response.body" and not message["more_body"]:
             done.set()
 
-    await call_app(make_app(stream), scope, on_send, done)
+    await call_app(make_app(stream, recorded), http_scope("2.3"), on_send, done)
 
-    assert scope["state"]["usage"] == USAGE
+    [call] = recorded
+    assert (call.model, call.status_code, call.usage, call.streamed) == (
+        "mock-1",
+        200,
+        USAGE,
+        True,
+    )
     assert b"".join(body_chunks(sent)) == b"".join(CHUNKS)
+
+
+@pytest.mark.anyio
+async def test_client_disconnect_still_records_the_request() -> None:
+    stream = UpstreamStream(CHUNKS[:1], hang=True)
+    recorded: list[RecordedCall] = []
+    disconnected = anyio.Event()
+
+    def on_send(message: Message) -> None:
+        if body_chunks([message]):
+            disconnected.set()
+
+    await call_app(make_app(stream, recorded), http_scope("2.3"), on_send, disconnected)
+
+    [call] = recorded
+    assert (call.status_code, call.usage, call.streamed) == (200, None, True)
 
 
 # --- usage parsing ---

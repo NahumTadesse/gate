@@ -33,6 +33,7 @@ from gate.config import Settings
 from gate.db import Base, create_sessionmaker
 from gate.main import create_app
 from gate.models import ApiKey
+from gate.usage import UsageRecorder, get_usage_recorder
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -212,14 +213,60 @@ async def committed_sessionmaker(
     await clear_tables(test_engine)
 
 
-def skip_api_key_auth(app: FastAPI) -> FastAPI:
+@dataclass
+class RecordedCall:
+    key: ApiKey
+    model: str
+    status_code: int
+    usage: object
+    streamed: bool
+
+
+class FakeUsageRecorder(UsageRecorder):
+    """Keeps what it's asked to record in a list instead of the database."""
+
+    def __init__(self, calls: list[RecordedCall]) -> None:
+        self.calls = calls
+
+    async def record(
+        self,
+        *,
+        key: ApiKey,
+        model: str,
+        status_code: int,
+        usage: object,
+        streamed: bool,
+    ) -> None:
+        self.calls.append(RecordedCall(key, model, status_code, usage, streamed))
+
+
+def skip_api_key_auth(
+    app: FastAPI, recorded: list[RecordedCall] | None = None
+) -> FastAPI:
     """Accept every proxy request as coming from an active key, for proxy tests
-    that aren't about authentication and so shouldn't need a database."""
+    that aren't about authentication and so shouldn't need a database.
+
+    Usage recording needs the database too, so it goes to `recorded` instead.
+    """
     key = ApiKey(
         id=uuid7(), org_id=uuid7(), name="test", prefix="gk_test0", key_hash="test"
     )
+    calls = [] if recorded is None else recorded
     app.dependency_overrides[get_api_key] = lambda: key
+    app.dependency_overrides[get_usage_recorder] = lambda: FakeUsageRecorder(calls)
     return app
+
+
+@dataclass
+class Upstream:
+    """The provider behind api_app. Tests can swap its handler."""
+
+    handler: Handler = lambda _: httpx.Response(200, json={"id": "chatcmpl-test"})
+
+
+@pytest.fixture
+def upstream() -> Upstream:
+    return Upstream()
 
 
 @pytest.fixture
@@ -227,10 +274,11 @@ async def api_app(
     test_database_url: str,
     test_engine: AsyncEngine,
     committed_sessionmaker: async_sessionmaker[AsyncSession],
+    upstream: Upstream,
     upstream_requests: list[httpx.Request],
 ) -> AsyncIterator[FastAPI]:
     """The whole app against the test database, with an upstream that records
-    requests and answers 200.
+    requests and by default answers 200.
 
     Requests commit for real, each in its own session as in production, so
     this builds on committed_sessionmaker (which also empties the tables around
@@ -239,7 +287,7 @@ async def api_app(
 
     def record(request: httpx.Request) -> httpx.Response:
         upstream_requests.append(request)
-        return httpx.Response(200, json={"id": "chatcmpl-test"})
+        return upstream.handler(request)
 
     app = create_app(
         settings=Settings(

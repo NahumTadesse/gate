@@ -52,25 +52,26 @@ def sse_event(payload: dict[str, Any]) -> bytes:
 
 
 class UpstreamStreamingResponse(StreamingResponse):
-    """A StreamingResponse that always releases the upstream stream when it ends.
+    """A StreamingResponse that always runs on_close when it ends.
 
-    Starlette does not close the body iterator when the client disconnects, so
-    without this the upstream request would keep generating (billed) tokens
-    until it finished on its own.
+    on_close releases the upstream stream (and records the request). Starlette
+    does not close the body iterator when the client disconnects, so without
+    this the upstream request would keep generating (billed) tokens until it
+    finished on its own.
     """
 
     def __init__(
         self,
         *args: Any,
-        close_upstream: Callable[[], Awaitable[object]],
+        on_close: Callable[[], Awaitable[object]],
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
-        self.close_upstream = close_upstream
+        self.on_close = on_close
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             await super().__call__(scope, receive, send)
         finally:
             with anyio.CancelScope(shield=True):
-                await self.close_upstream()
+                await self.on_close()

@@ -18,6 +18,7 @@ from gate.db import get_session
 from gate.errors import ApiKeyError
 from gate.models import ApiKey, AuthSession, Membership, Role, User
 from gate.security import hash_token
+from gate.usage import UsageRecorder, get_usage_recorder, requested_model
 
 SESSION_COOKIE = "gate_session"
 
@@ -61,8 +62,13 @@ CurrentUser = Annotated[User, Depends(get_current_user)]
 async def get_api_key(
     request: Request,
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    recorder: Annotated[UsageRecorder, Depends(get_usage_recorder)],
 ) -> ApiKey:
-    """The active API key from the Authorization header."""
+    """The active API key from the Authorization header.
+
+    A revoked key's rejection is recorded against that key. Missing and unknown
+    keys can't be: a recorded request must name a key and its org.
+    """
     if credentials is None:
         raise ApiKeyError("Missing API key; send it as 'Authorization: Bearer ...'")
     # A short-lived session of its own rather than get_session: that one stays
@@ -71,12 +77,18 @@ async def get_api_key(
     sessionmaker: async_sessionmaker[AsyncSession] = request.app.state.sessionmaker
     async with sessionmaker() as session:
         key = await session.scalar(
-            select(ApiKey).where(
-                ApiKey.key_hash == hash_token(credentials.credentials),
-                ApiKey.revoked_at.is_(None),
-            )
+            select(ApiKey).where(ApiKey.key_hash == hash_token(credentials.credentials))
         )
     if key is None:
+        raise ApiKeyError("Invalid API key")
+    if key.revoked_at is not None:
+        await recorder.record(
+            key=key,
+            model=requested_model(await request.body()),
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            usage=None,
+            streamed=False,
+        )
         raise ApiKeyError("Invalid API key")
     return key
 
