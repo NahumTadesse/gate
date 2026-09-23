@@ -86,8 +86,7 @@ export function MembersPage() {
                       <td>
                         {manage ? (
                           <select
-                            className="input"
-                            style={{ width: 120 }}
+                            className="input role-select"
                             aria-label={`Role for ${member.email}`}
                             value={member.role}
                             disabled={updateRole.isPending}

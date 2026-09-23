@@ -86,12 +86,11 @@ export function RequestsPage() {
         <Field label="Status">
           {(props) => (
             <input
-              className="input"
+              className="input input-status"
               name="status_code"
               type="number"
               min={100}
               max={599}
-              style={{ width: 84 }}
               defaultValue={params.get('status_code') ?? ''}
               {...props}
             />
@@ -168,7 +167,7 @@ export function RequestsPage() {
           </EmptyState>
         ) : (
           <>
-            <div style={{ opacity: requests.isPlaceholderData ? 0.6 : 1 }}>
+            <div className={requests.isPlaceholderData ? 'is-stale' : undefined}>
               <RequestsTable rows={requests.data.data} caption="Requests, newest first" keyNames={keyNames} />
             </div>
             <nav className="pagination" aria-label="Pages">

@@ -36,7 +36,7 @@ export function SpendChart({ data }: { data: DailyUsage[] }) {
 
   return (
     <div>
-      <div className="toolbar" style={{ justifyContent: 'flex-end', padding: '8px 12px 0' }}>
+      <div className="toolbar chart-toolbar">
         <Button
           size="sm"
           variant="ghost"
@@ -75,7 +75,6 @@ export function SpendChart({ data }: { data: DailyUsage[] }) {
         <figure
           id={tableId}
           className="chart"
-          style={{ margin: 0, padding: '4px 12px 12px' }}
           aria-label={`Daily spend over ${data.length} days, ${formatCost(total, 2)} in total`}
           role="img"
         >

@@ -96,15 +96,15 @@ function Usage({
       <dl className="stats" aria-label="Totals">
         <div className="stat">
           <dt className="stat-label">Spend</dt>
-          <dd className="stat-value" style={{ margin: 0 }}>{formatCost(totals.cost, 2)}</dd>
+          <dd className="stat-value">{formatCost(totals.cost, 2)}</dd>
         </div>
         <div className="stat">
           <dt className="stat-label">Requests</dt>
-          <dd className="stat-value" style={{ margin: 0 }}>{formatInt(totals.requests)}</dd>
+          <dd className="stat-value">{formatInt(totals.requests)}</dd>
         </div>
         <div className="stat">
           <dt className="stat-label">Tokens</dt>
-          <dd className="stat-value" style={{ margin: 0 }}>{formatInt(totals.tokens)}</dd>
+          <dd className="stat-value">{formatInt(totals.tokens)}</dd>
         </div>
       </dl>
       <Panel title={title}>

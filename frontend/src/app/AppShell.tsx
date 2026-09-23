@@ -26,6 +26,9 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="shell">
+      <a className="skip-link" href="#main">
+        Skip to content
+      </a>
       <aside className="sidebar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true" />
@@ -79,7 +82,9 @@ export function AppShell({ children }: { children: ReactNode }) {
           </div>
         </div>
       </aside>
-      <main className="main">{children}</main>
+      <main id="main" className="main" tabIndex={-1}>
+        {children}
+      </main>
     </div>
   )
 }
